@@ -1,0 +1,19 @@
+FROM openjdk:17-slim
+
+LABEL description="Code execution environment for Shodh Contest Platform"
+LABEL maintainer="Shodh AI"
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    python3 \
+    python3-pip && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /code
+
+COPY . /code
+
+CMD ["sh", "-c", "javac Solution.java && java Solution"]

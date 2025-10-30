@@ -33,6 +33,9 @@ public class CodeJudgeService {
     @Value("${judge.memory.limit.mb:256}")
     private long memoryLimitMb;
 
+    @Value("${judge.allow.fallback:true}")
+    private boolean allowFallback;
+
     @Async
     @Transactional
     public void judgeSubmission(Long submissionId) {
@@ -114,65 +117,29 @@ public class CodeJudgeService {
     private ExecutionResult executeCode(Submission submission, TestCase testCase) {
         ExecutionResult result = new ExecutionResult();
         Path submissionDir = null;
+        String containerId = null;
 
         try {
             submissionDir = Files.createTempDirectory(Paths.get(tempDir), "submission-");
             Path codeFile = submissionDir.resolve("Solution.java");
             Files.writeString(codeFile, submission.getCode());
+            
+            Path inputFile = submissionDir.resolve("input.txt");
+            Files.writeString(inputFile, testCase.getInput());
 
             long startTime = System.currentTimeMillis();
             
-            ProcessBuilder compileBuilder = new ProcessBuilder(
-                    "javac", "Solution.java"
-            );
-            compileBuilder.directory(submissionDir.toFile());
-            compileBuilder.redirectErrorStream(true);
-
-            Process compileProcess = compileBuilder.start();
-            boolean compileFinished = compileProcess.waitFor(timeoutSeconds, TimeUnit.SECONDS);
-
-            if (!compileFinished) {
-                compileProcess.destroyForcibly();
-                result.status = ExecutionStatus.TIME_LIMIT_EXCEEDED;
-                return result;
-            }
-
-            if (compileProcess.exitValue() != 0) {
-                result.status = ExecutionStatus.COMPILATION_ERROR;
-                result.error = readStream(compileProcess.getInputStream());
-                return result;
-            }
-
-            ProcessBuilder runBuilder = new ProcessBuilder(
-                    "java", "-Xmx" + memoryLimitMb + "m", "Solution"
-            );
-            runBuilder.directory(submissionDir.toFile());
+            boolean useDocker = isDockerAvailable();
             
-            Process runProcess = runBuilder.start();
-            
-            try (OutputStream os = runProcess.getOutputStream()) {
-                os.write(testCase.getInput().getBytes());
-                os.flush();
-            }
-
-            boolean runFinished = runProcess.waitFor(timeoutSeconds, TimeUnit.SECONDS);
-            long endTime = System.currentTimeMillis();
-            result.executionTimeMs = endTime - startTime;
-
-            if (!runFinished) {
-                runProcess.destroyForcibly();
-                result.status = ExecutionStatus.TIME_LIMIT_EXCEEDED;
-                return result;
-            }
-
-            if (runProcess.exitValue() != 0) {
+            if (useDocker) {
+                result = executeWithDocker(submissionDir, testCase, startTime);
+            } else if (allowFallback) {
+                System.err.println("WARNING: Docker not available, using unsafe ProcessBuilder fallback. This should NOT be used in production!");
+                result = executeWithProcessBuilder(submissionDir, testCase, startTime);
+            } else {
                 result.status = ExecutionStatus.RUNTIME_ERROR;
-                result.error = readStream(runProcess.getErrorStream());
-                return result;
+                result.error = "Docker is required for secure code execution but is not available. Set judge.allow.fallback=true only for development.";
             }
-
-            result.output = readStream(runProcess.getInputStream());
-            result.status = ExecutionStatus.SUCCESS;
 
         } catch (Exception e) {
             result.status = ExecutionStatus.RUNTIME_ERROR;
@@ -185,6 +152,182 @@ public class CodeJudgeService {
                 }
             }
         }
+
+        return result;
+    }
+
+    private boolean isDockerAvailable() {
+        try {
+            ProcessBuilder pb = new ProcessBuilder("docker", "--version");
+            Process process = pb.start();
+            return process.waitFor(2, TimeUnit.SECONDS) && process.exitValue() == 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private ExecutionResult executeWithDocker(Path submissionDir, TestCase testCase, long startTime) throws IOException, InterruptedException {
+        ExecutionResult result = new ExecutionResult();
+        String compileContainerName = "judge-compile-" + System.currentTimeMillis() + "-" + (int)(Math.random() * 1000);
+        String runContainerName = "judge-run-" + System.currentTimeMillis() + "-" + (int)(Math.random() * 1000);
+        
+        Process compileProcess = null;
+        Process runProcess = null;
+
+        try {
+            try {
+                ProcessBuilder compileBuilder = new ProcessBuilder(
+                        "docker", "run", "--rm",
+                        "--name", compileContainerName,
+                        "--network", "none",
+                        "--memory", memoryLimitMb + "m",
+                        "--cpus", "0.5",
+                        "--pids-limit", "50",
+                        "-v", submissionDir.toAbsolutePath() + ":/code",
+                        "-w", "/code",
+                        "openjdk:17-slim",
+                        "javac", "Solution.java"
+                );
+                
+                compileProcess = compileBuilder.start();
+                boolean compileFinished = compileProcess.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+
+                if (!compileFinished) {
+                    compileProcess.destroyForcibly();
+                    killContainer(compileContainerName);
+                    result.status = ExecutionStatus.TIME_LIMIT_EXCEEDED;
+                    return result;
+                }
+
+                if (compileProcess.exitValue() != 0) {
+                    result.status = ExecutionStatus.COMPILATION_ERROR;
+                    result.error = readStream(compileProcess.getErrorStream());
+                    return result;
+                }
+            } finally {
+                killContainer(compileContainerName);
+            }
+
+            try {
+                ProcessBuilder runBuilder = new ProcessBuilder(
+                        "docker", "run", "--rm",
+                        "--name", runContainerName,
+                        "--network", "none",
+                        "--memory", memoryLimitMb + "m",
+                        "--cpus", "0.5",
+                        "--pids-limit", "50",
+                        "--read-only",
+                        "--tmpfs", "/tmp:rw,noexec,nosuid,size=10m",
+                        "-v", submissionDir.toAbsolutePath() + ":/code:ro",
+                        "-w", "/code",
+                        "openjdk:17-slim",
+                        "sh", "-c", "java -Xmx" + (memoryLimitMb - 50) + "m Solution < input.txt"
+                );
+
+                runProcess = runBuilder.start();
+                boolean runFinished = runProcess.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+                long endTime = System.currentTimeMillis();
+                result.executionTimeMs = endTime - startTime;
+
+                if (!runFinished) {
+                    runProcess.destroyForcibly();
+                    killContainer(runContainerName);
+                    result.status = ExecutionStatus.TIME_LIMIT_EXCEEDED;
+                    return result;
+                }
+
+                if (runProcess.exitValue() != 0) {
+                    result.status = ExecutionStatus.RUNTIME_ERROR;
+                    result.error = readStream(runProcess.getErrorStream());
+                    return result;
+                }
+
+                result.output = readStream(runProcess.getInputStream());
+                result.status = ExecutionStatus.SUCCESS;
+            } finally {
+                killContainer(runContainerName);
+            }
+
+        } catch (Exception e) {
+            result.status = ExecutionStatus.RUNTIME_ERROR;
+            result.error = "Docker execution error: " + e.getMessage();
+        }
+
+        return result;
+    }
+
+    private void killContainer(String containerName) {
+        try {
+            ProcessBuilder killBuilder = new ProcessBuilder("docker", "kill", containerName);
+            Process killProcess = killBuilder.start();
+            killProcess.waitFor(2, TimeUnit.SECONDS);
+        } catch (Exception ignored) {
+        }
+        
+        try {
+            ProcessBuilder rmBuilder = new ProcessBuilder("docker", "rm", "-f", containerName);
+            Process rmProcess = rmBuilder.start();
+            rmProcess.waitFor(2, TimeUnit.SECONDS);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private ExecutionResult executeWithProcessBuilder(Path submissionDir, TestCase testCase, long startTime) throws IOException, InterruptedException {
+        ExecutionResult result = new ExecutionResult();
+
+        ProcessBuilder compileBuilder = new ProcessBuilder(
+                "javac", "Solution.java"
+        );
+        compileBuilder.directory(submissionDir.toFile());
+        compileBuilder.redirectErrorStream(true);
+
+        Process compileProcess = compileBuilder.start();
+        boolean compileFinished = compileProcess.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+
+        if (!compileFinished) {
+            compileProcess.destroyForcibly();
+            result.status = ExecutionStatus.TIME_LIMIT_EXCEEDED;
+            return result;
+        }
+
+        if (compileProcess.exitValue() != 0) {
+            result.status = ExecutionStatus.COMPILATION_ERROR;
+            result.error = readStream(compileProcess.getInputStream());
+            return result;
+        }
+
+        ProcessBuilder runBuilder = new ProcessBuilder(
+                "java", "-Xmx" + memoryLimitMb + "m", 
+                "-Djava.security.manager=allow",
+                "Solution"
+        );
+        runBuilder.directory(submissionDir.toFile());
+        
+        Process runProcess = runBuilder.start();
+        
+        try (OutputStream os = runProcess.getOutputStream()) {
+            os.write(testCase.getInput().getBytes());
+            os.flush();
+        }
+
+        boolean runFinished = runProcess.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+        long endTime = System.currentTimeMillis();
+        result.executionTimeMs = endTime - startTime;
+
+        if (!runFinished) {
+            runProcess.destroyForcibly();
+            result.status = ExecutionStatus.TIME_LIMIT_EXCEEDED;
+            return result;
+        }
+
+        if (runProcess.exitValue() != 0) {
+            result.status = ExecutionStatus.RUNTIME_ERROR;
+            result.error = readStream(runProcess.getErrorStream());
+            return result;
+        }
+
+        result.output = readStream(runProcess.getInputStream());
+        result.status = ExecutionStatus.SUCCESS;
 
         return result;
     }
