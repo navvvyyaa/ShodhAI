@@ -54,9 +54,17 @@ public class CodeJudgeService {
             boolean allPassed = true;
             String resultMessage = "";
 
+            System.out.println("[JUDGE] Start judging submission " + submissionId + " with " + testCases.size() + " testcases");
+
             for (TestCase testCase : testCases) {
+                System.out.println("[JUDGE] Running testcase order " + testCase.getTestOrder());
                 ExecutionResult result = executeCode(submission, testCase);
                 totalExecutionTime += result.executionTimeMs;
+
+                System.out.println("[JUDGE] Execution finished: status=" + result.status + ", time=" + result.executionTimeMs + "ms");
+                if (result.error != null && !result.error.isEmpty()) {
+                    System.out.println("[JUDGE][ERROR] " + result.error);
+                }
 
                 if (result.status == ExecutionStatus.SUCCESS) {
                     String actualOutput = result.output.trim();
@@ -128,27 +136,32 @@ public class CodeJudgeService {
             Files.writeString(inputFile, testCase.getInput());
 
             long startTime = System.currentTimeMillis();
-            
+
             boolean useDocker = isDockerAvailable();
+            System.out.println("[JUDGE] useDocker=" + useDocker + ", allowFallback=" + allowFallback);
             
             if (useDocker) {
+                System.out.println("[JUDGE] Running in Docker...");
                 result = executeWithDocker(submissionDir, testCase, startTime);
             } else if (allowFallback) {
-                System.err.println("WARNING: Docker not available, using unsafe ProcessBuilder fallback. This should NOT be used in production!");
+                System.err.println("[JUDGE][WARN] Docker not available, falling back to local ProcessBuilder.");
                 result = executeWithProcessBuilder(submissionDir, testCase, startTime);
             } else {
                 result.status = ExecutionStatus.RUNTIME_ERROR;
                 result.error = "Docker is required for secure code execution but is not available. Set judge.allow.fallback=true only for development.";
+                System.err.println("[JUDGE][FATAL] " + result.error);
             }
-
         } catch (Exception e) {
             result.status = ExecutionStatus.RUNTIME_ERROR;
             result.error = e.getMessage();
+            System.err.println("[JUDGE][EXCEPTION] " + e.getMessage());
+            e.printStackTrace();
         } finally {
             if (submissionDir != null) {
                 try {
                     deleteDirectory(submissionDir.toFile());
                 } catch (IOException ignored) {
+                    System.err.println("[JUDGE][WARN] Failed to clean up temp directory: " + submissionDir);
                 }
             }
         }
@@ -296,11 +309,12 @@ public class CodeJudgeService {
             return result;
         }
 
-        ProcessBuilder runBuilder = new ProcessBuilder(
-                "java", "-Xmx" + memoryLimitMb + "m", 
-                "-Djava.security.manager=allow",
-                "Solution"
-        );
+    // Do not enable the Java security manager here; it can cause SecurityException
+    // for otherwise valid user programs. Keep the runtime simple for the fallback mode.
+    ProcessBuilder runBuilder = new ProcessBuilder(
+        "java", "-Xmx" + memoryLimitMb + "m",
+        "Solution"
+    );
         runBuilder.directory(submissionDir.toFile());
         
         Process runProcess = runBuilder.start();
