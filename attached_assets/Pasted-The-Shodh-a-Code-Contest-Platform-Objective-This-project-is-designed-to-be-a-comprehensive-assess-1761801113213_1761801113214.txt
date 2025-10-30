@@ -1,0 +1,35 @@
+The "Shodh-a-Code" Contest Platform
+Objective:
+This project is designed to be a comprehensive assessment of your end-to-end full-stack and systems engineering capabilities. You will build a complete web application from the ground up, featuring a live, containerized code judging backend using our core technology stack. The goal is to see how you approach building a complex, real-world product feature that requires integrating multiple system components.
+This task will test your end-to-end skills in:
+Backend Development (Spring Boot): Designing a robust RESTful API, data modeling, and orchestrating external processes.
+Frontend Development (React/Next.js): Building a functional, real-time UI and managing asynchronous client-side state.
+DevOps & Systems Integration: Creating a Dockerized execution environment and programmatically controlling it from a Java application.
+Synthesizing a complete product and communicating your architectural decisions.
+The Business Context:
+Imagine you are a Full Stack Engineer at Shodh AI. To increase engagement on our AI Education platform, the product team wants to introduce a new feature: lightweight, real-time coding contests. Students should be able to join a specific contest using an ID, solve a few problems, and see their rankings on a live leaderboard. Your task is to build a functional prototype of this feature, including the backend service that securely runs and validates the submitted code.
+
+The Core Tasks
+Task 1: The Backend - Contest API & Live Judge (Spring Boot)
+You will build the complete REST API and the code judging engine that will power the platform.
+Data Modeling: Design and implement the data models for the following entities: Contest, Problem (including a set of input/output test cases), Submission, and User.
+API Endpoints: Implement the following REST endpoints:
+GET /api/contests/{contestId}: Fetches contest details.
+POST /api/submissions: Accepts a submission, adds it to a queue for asynchronous processing, and returns a unique submissionId.
+GET /api/submissions/{submissionId}: Fetches the latest status and result of a specific submission (e.g., "Pending", "Running", "Accepted").
+GET /api/contests/{contestId}/leaderboard: Returns the live leaderboard.
+Business Logic - The Live "Code Judge" Engine: Build a service that can run user-submitted code inside a Docker container.
+Create a Docker Image: Write a Dockerfile for a custom execution environment containing the necessary runtimes (e.g., a JDK).
+Orchestrate Execution: When a submission is processed, your Spring Boot service must programmatically execute a docker run command (e.g., via Java's ProcessBuilder).
+Manage the Process: The command must mount the user's code into the container, pass the problem's input test case via stdin, impose strict resource limits (time and memory), and capture the resulting stdout.
+Validate & Update: Compare the captured output with the expected output to determine the result ("Accepted", "Wrong Answer", etc.) and update the submission's status in the database. Ensure the container and any temporary files are cleaned up after each run.
+(Note: Please pre-populate your database with at least one sample contest and 2-3 problems to ensure the application is testable.)
+Task 2: The Frontend - Contest UI (React/Next.js & Tailwind CSS)
+You will build the user interface that provides a real-time experience by consuming the API you created.
+The "Join" Page: Create a simple form to accept a Contest ID and a Username.
+The Main Contest Page: This page should be the central hub, displaying a problem view, a code editor, and the leaderboard.
+Asynchronous Submission Flow:
+When a user submits code, call the POST /api/submissions endpoint.
+Upon receiving a submissionId, the frontend must poll the GET /api/submissions/{submissionId} endpoint every 2-3 seconds.
+Display the live status ("Running", "Accepted", etc.) to the user as it's updated.
+Live Leaderboard: The leaderboard component should poll GET /api/contests/{contestId}/leaderboard periodically (e.g., every 15-30 seconds) to keep the rankings fresh and simulate a live event.
